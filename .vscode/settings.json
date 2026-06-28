@@ -1,0 +1,6 @@
+{
+  "editor.formatOnSave": true,
+  "[yaml]": { "editor.defaultFormatter": "redhat.vscode-yaml" },
+  "[markdown]": { "editor.defaultFormatter": "DavidAnson.vscode-markdownlint" },
+  "[python]": { "editor.defaultFormatter": "charliermarsh.ruff" }
+}

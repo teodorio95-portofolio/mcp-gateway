@@ -1,0 +1,31 @@
+# Fast local quality gates (anti-slop). Heavy work runs in the gateway / tests.
+#   pip install pre-commit && pre-commit install        # enable on this repo
+#   pre-commit run --all-files                          # run once over everything
+#   pre-commit autoupdate                               # bump the pinned revs
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-added-large-files
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.18
+    hooks:
+      - id: ruff             # unused imports/vars = classic AI leftovers
+        args: [--fix]
+      - id: ruff-format
+
+  # Markdown linting is handled by the VS Code markdownlint extension (it reads
+  # .markdownlint.yaml). Kept out of pre-commit to avoid the Node toolchain.
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks

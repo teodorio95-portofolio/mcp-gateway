@@ -1,0 +1,16 @@
+# Gateway policy — the single source of truth for "who may call which tool".
+# Default-deny: an unknown API key is rejected, and a client may only call the
+# tools on its allow-list. Keys here are LOCAL DEV placeholders, not secrets.
+clients:
+  # Least-privilege client: can only run read-only scans.
+  - name: analyst
+    api_key: "dev-analyst-key"
+    allow_tools:
+      - trivy_fs_scan
+      - gitleaks_scan
+
+  # Privileged client: every tool the upstream exposes ("*").
+  - name: admin
+    api_key: "dev-admin-key"
+    allow_tools:
+      - "*"
