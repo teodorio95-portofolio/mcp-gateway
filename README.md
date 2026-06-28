@@ -73,45 +73,67 @@ make test    # run the test suite
 `make demo` prints each attack landing without the gateway and being blocked /
 redacted / denied through it, then dumps the audit trail.
 
-## Run it as a server — fronting the real #6
+## Run it as a real MCP server — connect a real client
 
-`make serve` spawns project **#6** (mcp-security-toolkit) over stdio and proxies
-it, so the gateway now mediates a *real* MCP server's tools:
+The gateway speaks **MCP Streamable HTTP** (via the SDK), so a real MCP client —
+Claude Code, Cline, an agent — connects to it exactly like any MCP server, just
+with a Bearer key. `make serve` spawns project **#6** over stdio and proxies it,
+so the client gets #6's tools through the gateway's security pipeline.
 
 ```bash
-make serve                      # http://127.0.0.1:8080/mcp  (spawns #6 on startup)
-
-# admin sees every real tool from #6:
-curl -s localhost:8080/mcp -H "Authorization: Bearer dev-admin-key" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-# -> trivy_fs_scan, gitleaks_scan, checkov_scan, semgrep_scan
-
-# analyst's list is filtered to their allow-list, and calling a tool off it is denied:
-curl -s localhost:8080/mcp -H "Authorization: Bearer dev-analyst-key" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"checkov_scan","arguments":{"path":"."}}}'
-# -> JSON-RPC error: tool 'checkov_scan' not permitted
-make audit                      # see the denial recorded
+make serve     # http://127.0.0.1:8080/mcp  (spawns #6 on startup)
 ```
 
-Set `MCPGW_UPSTREAM=mock` to run without #6 (the in-process fake). Clients and
-their tool allow-lists live in [policy.yaml](policy.yaml) (the dev keys there are
-local placeholders, not secrets).
+**Plug it into Claude Code** — point it at the gateway URL with your key:
+
+```bash
+claude mcp add secure-gateway --transport http http://127.0.0.1:8080/mcp \
+  --header "Authorization: Bearer dev-admin-key"
+```
+
+or in a project `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "secure-gateway": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp",
+      "headers": { "Authorization": "Bearer dev-admin-key" }
+    }
+  }
+}
+```
+
+Now the agent sees only the tools that key is allowed, every call is scanned, and
+each decision is audited. Swap the key to `dev-analyst-key` and the same client
+sees a **filtered** tool list and gets **denied** on tools off its allow-list —
+that's the whole point. `make audit` shows the trail.
+
+Set `MCPGW_UPSTREAM=mock` to run without #6 (the in-process fake, with a poisoned
+tool for the demo). Clients and their allow-lists live in [policy.yaml](policy.yaml)
+(the dev keys there are local placeholders, not secrets).
+
+> Raw `curl` no longer works for tool calls — a real MCP server needs the
+> initialize handshake, session and SSE/JSON content negotiation. Use an MCP
+> client (above) or `make demo` to exercise it.
 
 ## Repository layout
 
 ```
 mcp-gateway/
-├── pyproject.toml               # uv project: FastAPI + MCP + pyyaml; [guard] = llm-guard
+├── pyproject.toml               # uv project: MCP SDK + Starlette + pyyaml; [guard] = llm-guard
 ├── policy.yaml                  # client API keys -> tool allow-list (source of truth)
 ├── src/mcp_gateway/
-│   ├── app.py                   # FastAPI: auth -> allow-list -> scan -> forward -> audit
+│   ├── app.py                   # MCP server (Streamable HTTP) + Bearer auth shim
+│   ├── gateway.py               # GatewayCore: allow-list -> scan -> forward -> audit
 │   ├── config.py                # env-driven settings
 │   ├── policy.py                # load policy.yaml, default-deny resolution
 │   ├── scanner.py               # arg/result scanning: pattern backstop + llm-guard ([guard])
 │   ├── upstream.py              # MockUpstream (offline) + StdioUpstream (proxies #6)
 │   └── audit.py                 # append-only JSONL audit log
 ├── scripts/demo.py              # offline before/after story
-├── tests/                       # pytest: auth, allow-list, scanning, poisoning, audit
+├── tests/                       # pytest: core pipeline + real-client streamable-HTTP
 ├── Makefile                     # up / serve / demo / test / audit / down / help
 └── docs/architecture.md         # threats, pipeline, portfolio placement, roadmap
 ```
@@ -129,11 +151,12 @@ uv sync --extra guard     # installs llm-guard (heavy: torch; downloads a model 
 
 ## Status
 
-Working: auth, allow-list, **layered scanner (pattern backstop + optional
-llm-guard)**, audit, `MockUpstream`, demo, tests, and `StdioUpstream` — the
-gateway proxies the real project #6 over stdio. Follow-up: full MCP
-streamable-HTTP compliance. See the roadmap in
-[docs/architecture.md](docs/architecture.md).
+Feature-complete for the core idea: a **real MCP server over Streamable HTTP**
+(connect Claude Code/Cline with a Bearer key) with per-client auth, tool
+allow-list, a **layered scanner** (pattern backstop + optional llm-guard),
+append-only audit, and a **real stdio upstream** to project #6 — plus the offline
+demo and a real-client test suite. See [docs/architecture.md](docs/architecture.md)
+for the design.
 
 ## ⚠️ Note
 

@@ -53,16 +53,19 @@ and a tool whose description carries a hidden instruction is filtered out.
 It reuses #7's defense idea (llm-guard scanning) at the protocol boundary instead
 of inside a single agent.
 
-## Skeleton vs. roadmap
+## Implementation
 
-Already working: auth, allow-list, audit, the offline `MockUpstream` +
-before/after demo, **`StdioUpstream`** (spawns project #6 over stdio and proxies
-it via the MCP client SDK, one persistent session connected in the FastAPI
-lifespan), and a **layered scanner** — a deterministic regex backstop plus
-**llm-guard** (PromptInjection on input, Sensitive/PII on output, the same
-defense as #7) under the optional `guard` extra, lazily loaded and fail-open.
-
-Planned (follow-up PR):
-
-- **full MCP streamable-HTTP** — SSE streaming and session handling for real
-  MCP-client compatibility.
+- **Transport** — a real MCP server over **Streamable HTTP**, built on the SDK's
+  low-level `Server` + `StreamableHTTPSessionManager` (no hand-rolled JSON-RPC).
+  A Starlette ASGI shim authenticates the `Authorization: Bearer` key to a client
+  and stashes it in a context var the tool handlers read. So Claude Code / Cline
+  connect with a key, exactly as to any MCP server.
+- **`GatewayCore`** (`gateway.py`) — the transport-agnostic security pipeline
+  (allow-list → scan args → forward → redact result → audit). The HTTP layer, the
+  offline demo and the unit tests all drive this same core.
+- **Upstream** — `StdioUpstream` spawns project #6 over stdio and proxies it via
+  the MCP client SDK (one persistent session, opened in the app lifespan);
+  `MockUpstream` is the offline fake (with a poisoned tool) for the demo/tests.
+- **Scanner** — a deterministic regex backstop plus **llm-guard** (PromptInjection
+  on input, Sensitive/PII on output, the same defense as #7) under the optional
+  `guard` extra, lazily loaded and fail-open.
