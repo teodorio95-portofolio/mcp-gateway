@@ -1,0 +1,40 @@
+[project]
+name = "mcp-gateway"
+version = "0.1.0"
+description = "A local, free security gateway (proxy) in front of an MCP server: per-client auth + tool allow-list, llm-guard argument/result scanning, and an audit log."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "mcp[cli]>=1.2.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+mcp-gateway = "mcp_gateway.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_gateway"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+
+# llm-guard pulls a heavy ML stack (torch/transformers); it is wired into the
+# scanner in a follow-up PR. Until then the scanner uses a lightweight pattern
+# fallback so the gateway installs and runs fast.
+[project.optional-dependencies]
+guard = [
+    "llm-guard>=0.3.15",
+]
+
+[tool.ruff]
+line-length = 100

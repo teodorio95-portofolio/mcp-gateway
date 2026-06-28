@@ -1,0 +1,12 @@
+{
+  "recommendations": [
+    "SonarSource.sonarlint-vscode",
+    "usernamehw.errorlens",
+    "streetsidesoftware.code-spell-checker",
+    "redhat.vscode-yaml",
+    "DavidAnson.vscode-markdownlint",
+    "charliermarsh.ruff",
+    "ms-python.python",
+    "GitLab.gitlab-workflow"
+  ]
+}
