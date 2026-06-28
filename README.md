@@ -73,20 +73,29 @@ make test    # run the test suite
 `make demo` prints each attack landing without the gateway and being blocked /
 redacted / denied through it, then dumps the audit trail.
 
-## Run it as a server
+## Run it as a server — fronting the real #6
+
+`make serve` spawns project **#6** (mcp-security-toolkit) over stdio and proxies
+it, so the gateway now mediates a *real* MCP server's tools:
 
 ```bash
-make serve                      # http://127.0.0.1:8080/mcp
-# in another shell — analyst may scan, but not the privileged tool:
+make serve                      # http://127.0.0.1:8080/mcp  (spawns #6 on startup)
+
+# admin sees every real tool from #6:
+curl -s localhost:8080/mcp -H "Authorization: Bearer dev-admin-key" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+# -> trivy_fs_scan, gitleaks_scan, checkov_scan, semgrep_scan
+
+# analyst's list is filtered to their allow-list, and calling a tool off it is denied:
 curl -s localhost:8080/mcp -H "Authorization: Bearer dev-analyst-key" \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lookup_invoice","arguments":{}}}'
-# -> JSON-RPC error: tool 'lookup_invoice' not permitted
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"checkov_scan","arguments":{"path":"."}}}'
+# -> JSON-RPC error: tool 'checkov_scan' not permitted
 make audit                      # see the denial recorded
 ```
 
-Clients and their tool allow-lists live in [policy.yaml](policy.yaml) (the dev
-keys there are local placeholders, not secrets).
+Set `MCPGW_UPSTREAM=mock` to run without #6 (the in-process fake). Clients and
+their tool allow-lists live in [policy.yaml](policy.yaml) (the dev keys there are
+local placeholders, not secrets).
 
 ## Repository layout
 
@@ -99,7 +108,7 @@ mcp-gateway/
 │   ├── config.py                # env-driven settings
 │   ├── policy.py                # load policy.yaml, default-deny resolution
 │   ├── scanner.py               # arg/result scanning (pattern now; llm-guard next PR)
-│   ├── upstream.py              # MockUpstream (offline) + StdioUpstream (#6, next PR)
+│   ├── upstream.py              # MockUpstream (offline) + StdioUpstream (proxies #6)
 │   └── audit.py                 # append-only JSONL audit log
 ├── scripts/demo.py              # offline before/after story
 ├── tests/                       # pytest: auth, allow-list, scanning, poisoning, audit
@@ -109,9 +118,10 @@ mcp-gateway/
 
 ## Status
 
-Skeleton (PR #1): auth, allow-list, pattern scanner, audit, `MockUpstream`, demo,
-tests. Follow-ups: llm-guard scanner (`[guard]` extra), real stdio upstream to
-#6, and full MCP streamable-HTTP compliance. See the roadmap in
+Working: auth, allow-list, pattern scanner, audit, `MockUpstream`, demo, tests,
+**and `StdioUpstream` — the gateway proxies the real project #6 over stdio**.
+Follow-ups: swap the pattern scanner for llm-guard (`[guard]` extra) and full MCP
+streamable-HTTP compliance. See the roadmap in
 [docs/architecture.md](docs/architecture.md).
 
 ## ⚠️ Note

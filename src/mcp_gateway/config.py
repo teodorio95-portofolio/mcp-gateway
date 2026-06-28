@@ -19,6 +19,9 @@ class Settings:
 
     policy_path: Path
     audit_path: Path
+    # Which upstream to use: "stdio" spawns a real MCP server, "mock" uses the
+    # in-process fake (handy for an HTTP demo without project #6 present).
+    upstream_kind: str
     # Command the gateway spawns to reach the upstream MCP server (stdio).
     # Defaults to the sibling project #6 (mcp-security-toolkit) if present.
     upstream_cmd: list[str]
@@ -35,9 +38,11 @@ def load_settings() -> Settings:
         "uv run --project ../mcp-security-toolkit mcp-security-toolkit",
     ).split()
     guardrails = os.environ.get("GUARDRAILS", "on").strip().lower() != "off"
+    kind = os.environ.get("MCPGW_UPSTREAM", "stdio").strip().lower()
     return Settings(
         policy_path=policy,
         audit_path=audit,
+        upstream_kind=kind,
         upstream_cmd=upstream,
         guardrails=guardrails,
     )
