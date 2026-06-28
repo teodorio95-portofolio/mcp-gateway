@@ -1,32 +1,38 @@
-"""The gateway HTTP app (FastAPI).
+"""The gateway as a real MCP server over Streamable HTTP.
 
-A client speaks MCP-style JSON-RPC to POST /mcp with a Bearer API key. For every
-request the gateway runs the security pipeline:
+A client (Claude Code, Cline, an agent) connects to POST /mcp with a Bearer API
+key, exactly as it would to any MCP server. The gateway authenticates the key to
+a client, then runs every `tools/list` / `tools/call` through the security
+pipeline (`GatewayCore`) before proxying to the upstream MCP server.
 
-    1. auth        — Bearer key -> client (default-deny on unknown key)
-    2. allow-list  — tools/list is filtered; tools/call is refused if not allowed
-    3. scan args   — block tool arguments that look like prompt injection
-    4. upstream    — forward the call to the protected MCP server
-    5. scan result — redact secrets from the result before returning it
-    6. audit       — append a JSONL record of the decision
-
-This is the skeleton slice: a `MockUpstream`, a pattern-based scanner, and a
-simplified JSON-RPC surface. Real llm-guard scanning, the stdio upstream to
-project #6, and full MCP streamable-HTTP compliance land in follow-up PRs.
+The MCP protocol itself is handled by the SDK's low-level `Server` +
+`StreamableHTTPSessionManager` — we don't hand-roll JSON-RPC/SSE. Per-request
+auth is done in an ASGI shim that resolves the key and stashes the client in a
+context var the tool handlers read.
 """
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-from typing import Any
+import contextlib
+from contextvars import ContextVar
 
-from fastapi import FastAPI, Header, HTTPException, Request
+import mcp.types as types
+from mcp.server.lowlevel import Server
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Mount, Route
+from starlette.types import Receive, Scope, Send
 
-from . import audit
 from .config import Settings, load_settings
+from .gateway import GatewayCore, GatewayError
 from .policy import Client, Policy, load_policy
-from .scanner import ScanResult, scan_input, scan_output
-from .upstream import MockUpstream, StdioUpstream, Tool, Upstream
+from .upstream import MockUpstream, StdioUpstream, Upstream
+
+# The client resolved from the Bearer key for the in-flight request. Set by the
+# ASGI auth shim, read by the MCP tool handlers (same task -> context propagates).
+_current_client: ContextVar[Client | None] = ContextVar("current_client", default=None)
 
 
 def _build_upstream(settings: Settings) -> Upstream:
@@ -36,126 +42,76 @@ def _build_upstream(settings: Settings) -> Upstream:
     return StdioUpstream(settings.upstream_cmd)
 
 
-def _jsonrpc_result(req_id: Any, result: Any) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": req_id, "result": result}
+def _authenticate(policy: Policy, authorization: str | None) -> Client | None:
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    return policy.client_for_key(token)
 
 
-def _jsonrpc_error(req_id: Any, code: int, message: str) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
-
-
-def create_app(settings: Settings | None = None, upstream: Upstream | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, upstream: Upstream | None = None) -> Starlette:
     settings = settings or load_settings()
-    policy: Policy = load_policy(settings.policy_path)
+    policy = load_policy(settings.policy_path)
     upstream = upstream or _build_upstream(settings)
+    core = GatewayCore(settings, upstream)
 
-    @asynccontextmanager
-    async def lifespan(_app: FastAPI):
-        # A real stdio upstream is spawned once and reused for the app's lifetime.
+    server: Server = Server("mcp-gateway")
+
+    @server.list_tools()
+    async def _list_tools() -> list[types.Tool]:
+        client = _current_client.get()
+        assert client is not None  # the auth shim guarantees this
+        tools = await core.list_tools(client)
+        return [
+            types.Tool(name=t.name, description=t.description, inputSchema=t.input_schema)
+            for t in tools
+        ]
+
+    @server.call_tool()
+    async def _call_tool(name: str, arguments: dict) -> list[types.ContentBlock]:
+        client = _current_client.get()
+        assert client is not None
+        try:
+            text = await core.call_tool(client, name, arguments or {})
+        except GatewayError as exc:
+            # Surfaced to the client as an MCP tool error (isError=true).
+            raise ValueError(str(exc)) from exc
+        return [types.TextContent(type="text", text=text)]
+
+    session_manager = StreamableHTTPSessionManager(app=server, stateless=True, json_response=True)
+
+    async def mcp_endpoint(scope: Scope, receive: Receive, send: Send) -> None:
+        client = _authenticate(policy, Request(scope, receive).headers.get("authorization"))
+        if client is None:
+            await JSONResponse({"error": "invalid or missing API key"}, status_code=401)(
+                scope, receive, send
+            )
+            return
+        token = _current_client.set(client)
+        try:
+            await session_manager.handle_request(scope, receive, send)
+        finally:
+            _current_client.reset(token)
+
+    async def healthz(_request: Request) -> JSONResponse:
+        return JSONResponse({"status": "ok"})
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Starlette):
         if isinstance(upstream, StdioUpstream):
             await upstream.connect()
         try:
-            yield
+            async with session_manager.run():
+                yield
         finally:
             if isinstance(upstream, StdioUpstream):
                 await upstream.aclose()
 
-    app = FastAPI(title="mcp-gateway", version="0.1.0", lifespan=lifespan)
-    app.state.settings = settings
-    app.state.policy = policy
-    app.state.upstream = upstream
-
-    def authenticate(authorization: str | None) -> Client:
-        token = None
-        if authorization and authorization.lower().startswith("bearer "):
-            token = authorization[7:].strip()
-        client = policy.client_for_key(token)
-        if client is None:
-            raise HTTPException(status_code=401, detail="invalid or missing API key")
-        return client
-
-    @app.get("/healthz")
-    def healthz() -> dict[str, str]:
-        return {"status": "ok"}
-
-    @app.post("/mcp")
-    async def mcp(
-        request: Request, authorization: str | None = Header(default=None)
-    ) -> dict[str, Any]:
-        client = authenticate(authorization)
-        body = await request.json()
-        req_id = body.get("id")
-        method = body.get("method")
-        params = body.get("params") or {}
-
-        if method == "initialize":
-            return _jsonrpc_result(
-                req_id, {"serverInfo": {"name": "mcp-gateway", "version": "0.1.0"}}
-            )
-
-        if method == "tools/list":
-            tools: list[Tool] = await upstream.list_tools()
-            visible: list[dict[str, str]] = []
-            for t in tools:
-                if not client.allows(t.name):
-                    continue  # allow-list: hide tools the client can't use
-                # Tool poisoning: a hidden instruction in the description.
-                desc_scan = scan_input(t.description)
-                if settings.guardrails and not desc_scan.allowed:
-                    audit.record(
-                        settings.audit_path,
-                        client=client.name,
-                        tool=t.name,
-                        action="list",
-                        verdict="hidden",
-                        reasons=desc_scan.reasons,
-                    )
-                    continue
-                visible.append({"name": t.name, "description": t.description})
-            return _jsonrpc_result(req_id, {"tools": visible})
-
-        if method == "tools/call":
-            name = params.get("name", "")
-            arguments = params.get("arguments") or {}
-
-            if not client.allows(name):
-                audit.record(
-                    settings.audit_path,
-                    client=client.name,
-                    tool=name,
-                    action="call",
-                    verdict="denied",
-                    reasons=["tool not in allow-list"],
-                )
-                return _jsonrpc_error(req_id, -32601, f"tool {name!r} not permitted")
-
-            if settings.guardrails:
-                arg_scan = scan_input(" ".join(str(v) for v in arguments.values()))
-                if not arg_scan.allowed:
-                    audit.record(
-                        settings.audit_path,
-                        client=client.name,
-                        tool=name,
-                        action="call",
-                        verdict="blocked",
-                        reasons=arg_scan.reasons,
-                    )
-                    return _jsonrpc_error(req_id, -32602, "arguments blocked by guardrail")
-
-            raw = await upstream.call_tool(name, arguments)
-            out = scan_output(raw) if settings.guardrails else ScanResult(True, raw, [])
-            audit.record(
-                settings.audit_path,
-                client=client.name,
-                tool=name,
-                action="call",
-                verdict="sanitized" if out.reasons else "allowed",
-                reasons=out.reasons,
-            )
-            return _jsonrpc_result(req_id, {"content": [{"type": "text", "text": out.sanitized}]})
-
-        return _jsonrpc_error(req_id, -32601, f"method {method!r} not supported")
-
+    app = Starlette(
+        routes=[Route("/healthz", healthz, methods=["GET"]), Mount("/mcp", app=mcp_endpoint)],
+        lifespan=lifespan,
+    )
+    app.state.core = core
     return app
 
 
