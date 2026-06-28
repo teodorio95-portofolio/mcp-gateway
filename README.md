@@ -107,7 +107,7 @@ mcp-gateway/
 │   ├── app.py                   # FastAPI: auth -> allow-list -> scan -> forward -> audit
 │   ├── config.py                # env-driven settings
 │   ├── policy.py                # load policy.yaml, default-deny resolution
-│   ├── scanner.py               # arg/result scanning (pattern now; llm-guard next PR)
+│   ├── scanner.py               # arg/result scanning: pattern backstop + llm-guard ([guard])
 │   ├── upstream.py              # MockUpstream (offline) + StdioUpstream (proxies #6)
 │   └── audit.py                 # append-only JSONL audit log
 ├── scripts/demo.py              # offline before/after story
@@ -116,11 +116,22 @@ mcp-gateway/
 └── docs/architecture.md         # threats, pipeline, portfolio placement, roadmap
 ```
 
+## Stronger scanning (optional) — llm-guard
+
+The scanner is layered: an always-on **regex backstop** (deterministic, zero-dep)
+plus **llm-guard** when you install the optional extra — the same trained defense
+as project #7, catching paraphrased/obfuscated prompt injection and PII the regex
+misses. It loads lazily and fails open (the backstop still applies).
+
+```bash
+uv sync --extra guard     # installs llm-guard (heavy: torch; downloads a model on first scan)
+```
+
 ## Status
 
-Working: auth, allow-list, pattern scanner, audit, `MockUpstream`, demo, tests,
-**and `StdioUpstream` — the gateway proxies the real project #6 over stdio**.
-Follow-ups: swap the pattern scanner for llm-guard (`[guard]` extra) and full MCP
+Working: auth, allow-list, **layered scanner (pattern backstop + optional
+llm-guard)**, audit, `MockUpstream`, demo, tests, and `StdioUpstream` — the
+gateway proxies the real project #6 over stdio. Follow-up: full MCP
 streamable-HTTP compliance. See the roadmap in
 [docs/architecture.md](docs/architecture.md).
 
