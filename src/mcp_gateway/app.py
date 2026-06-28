@@ -17,6 +17,7 @@ project #6, and full MCP streamable-HTTP compliance land in follow-up PRs.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -25,7 +26,14 @@ from . import audit
 from .config import Settings, load_settings
 from .policy import Client, Policy, load_policy
 from .scanner import ScanResult, scan_input, scan_output
-from .upstream import MockUpstream, Tool, Upstream
+from .upstream import MockUpstream, StdioUpstream, Tool, Upstream
+
+
+def _build_upstream(settings: Settings) -> Upstream:
+    """Pick the upstream from config: a real stdio server, or the in-process mock."""
+    if settings.upstream_kind == "mock":
+        return MockUpstream()
+    return StdioUpstream(settings.upstream_cmd)
 
 
 def _jsonrpc_result(req_id: Any, result: Any) -> dict[str, Any]:
@@ -39,9 +47,20 @@ def _jsonrpc_error(req_id: Any, code: int, message: str) -> dict[str, Any]:
 def create_app(settings: Settings | None = None, upstream: Upstream | None = None) -> FastAPI:
     settings = settings or load_settings()
     policy: Policy = load_policy(settings.policy_path)
-    upstream = upstream or MockUpstream()
+    upstream = upstream or _build_upstream(settings)
 
-    app = FastAPI(title="mcp-gateway", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # A real stdio upstream is spawned once and reused for the app's lifetime.
+        if isinstance(upstream, StdioUpstream):
+            await upstream.connect()
+        try:
+            yield
+        finally:
+            if isinstance(upstream, StdioUpstream):
+                await upstream.aclose()
+
+    app = FastAPI(title="mcp-gateway", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
     app.state.policy = policy
     app.state.upstream = upstream
@@ -75,7 +94,7 @@ def create_app(settings: Settings | None = None, upstream: Upstream | None = Non
             )
 
         if method == "tools/list":
-            tools: list[Tool] = upstream.list_tools()
+            tools: list[Tool] = await upstream.list_tools()
             visible: list[dict[str, str]] = []
             for t in tools:
                 if not client.allows(t.name):
@@ -123,7 +142,7 @@ def create_app(settings: Settings | None = None, upstream: Upstream | None = Non
                     )
                     return _jsonrpc_error(req_id, -32602, "arguments blocked by guardrail")
 
-            raw = upstream.call_tool(name, arguments)
+            raw = await upstream.call_tool(name, arguments)
             out = scan_output(raw) if settings.guardrails else ScanResult(True, raw, [])
             audit.record(
                 settings.audit_path,

@@ -1,19 +1,25 @@
 """The upstream MCP server the gateway protects.
 
-`Upstream` is the interface the gateway calls: list the real tools, and invoke
-one. Two implementations:
+`Upstream` is the async interface the gateway calls: list the real tools, and
+invoke one. Two implementations:
 
   - MockUpstream — an in-process fake (one benign tool + one *poisoned* tool whose
     description carries an injection). Used by tests and the offline demo, so the
     security pipeline is exercisable without a live server.
   - StdioUpstream — spawns a real MCP server (project #6) over stdio and proxies
-    via the MCP client SDK. Wired in a follow-up PR (marked below).
+    via the MCP client SDK, holding one persistent session for the gateway's
+    lifetime (connect on startup, close on shutdown).
 """
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 
 @dataclass(frozen=True)
@@ -23,8 +29,8 @@ class Tool:
 
 
 class Upstream(Protocol):
-    def list_tools(self) -> list[Tool]: ...
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> str: ...
+    async def list_tools(self) -> list[Tool]: ...
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str: ...
 
 
 class MockUpstream:
@@ -41,10 +47,10 @@ class MockUpstream:
         ),
     ]
 
-    def list_tools(self) -> list[Tool]:
+    async def list_tools(self) -> list[Tool]:
         return list(self._TOOLS)
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         if name == "trivy_fs_scan":
             return '{"results": [], "summary": "no findings"}'
         if name == "lookup_invoice":
@@ -54,13 +60,49 @@ class MockUpstream:
 
 
 class StdioUpstream:
-    """Real upstream over stdio (spawns project #6). Implemented in a follow-up PR."""
+    """Real upstream: spawn an MCP server (project #6) over stdio and proxy it.
+
+    One persistent `ClientSession` is opened by `connect()` (call it once, on app
+    startup) and reused for every request; `aclose()` tears it down. Calls are
+    serialized by a lock — a single stdio session is not concurrency-safe.
+    """
 
     def __init__(self, command: list[str]) -> None:
-        self._command = command
+        if not command:
+            raise ValueError("StdioUpstream needs a non-empty command to spawn the server")
+        self._params = StdioServerParameters(command=command[0], args=list(command[1:]))
+        self._stack: AsyncExitStack | None = None
+        self._session: ClientSession | None = None
+        self._lock = asyncio.Lock()
 
-    def list_tools(self) -> list[Tool]:  # pragma: no cover - next PR
-        raise NotImplementedError("StdioUpstream lands in the upstream-integration PR")
+    async def connect(self) -> None:
+        """Spawn the upstream server and initialize the MCP session."""
+        stack = AsyncExitStack()
+        read, write = await stack.enter_async_context(stdio_client(self._params))
+        session = await stack.enter_async_context(ClientSession(read, write))
+        await session.initialize()
+        self._stack, self._session = stack, session
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> str:  # pragma: no cover
-        raise NotImplementedError("StdioUpstream lands in the upstream-integration PR")
+    async def aclose(self) -> None:
+        if self._stack is not None:
+            await self._stack.aclose()
+            self._stack = self._session = None
+
+    def _require_session(self) -> ClientSession:
+        if self._session is None:
+            raise RuntimeError("StdioUpstream is not connected — call connect() first")
+        return self._session
+
+    async def list_tools(self) -> list[Tool]:
+        session = self._require_session()
+        async with self._lock:
+            result = await session.list_tools()
+        return [Tool(t.name, t.description or "") for t in result.tools]
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        session = self._require_session()
+        async with self._lock:
+            result = await session.call_tool(name, arguments)
+        parts = [getattr(c, "text", None) for c in result.content]
+        texts = [p for p in parts if p is not None]
+        return "\n".join(texts) if texts else str(result.content)

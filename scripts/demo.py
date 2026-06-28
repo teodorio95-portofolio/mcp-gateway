@@ -9,6 +9,7 @@ story of the rest of the portfolio.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from pathlib import Path
@@ -30,11 +31,11 @@ def _verdict(name: str, blocked: bool, blocked_word: str, open_word: str) -> Non
     print(f"  {name:38} {mark}  ({blocked_word if blocked else open_word})")
 
 
-def without_gateway() -> None:
+async def without_gateway() -> None:
     """Talk to the upstream MCP server directly — nothing in the way."""
     up = MockUpstream()
     _verdict("confused deputy (analyst -> power tool)", False, "", "any caller can invoke any tool")
-    poisoned = any(t.name == POISON for t in up.list_tools())
+    poisoned = any(t.name == POISON for t in await up.list_tools())
     _verdict(
         "tool poisoning (hidden instruction)",
         not poisoned,
@@ -42,7 +43,7 @@ def without_gateway() -> None:
         "poisoned description reaches the agent",
     )
     _verdict("argument injection", False, "", "injected args reach the tool")
-    leaked = "sk-LAB-1337" in up.call_tool(POISON, {})
+    leaked = "sk-LAB-1337" in await up.call_tool(POISON, {})
     _verdict("secret in result", not leaked, "", "ops key sk-LAB-1337 leaks to caller")
 
 
@@ -52,7 +53,13 @@ def through_gateway() -> None:
         audit = Path(d) / "audit.jsonl"
         c = TestClient(
             create_app(
-                settings=Settings(_ROOT / "policy.yaml", audit, [], guardrails=True),
+                settings=Settings(
+                    policy_path=_ROOT / "policy.yaml",
+                    audit_path=audit,
+                    upstream_kind="mock",
+                    upstream_cmd=[],
+                    guardrails=True,
+                ),
                 upstream=MockUpstream(),
             )
         )
@@ -96,7 +103,7 @@ def through_gateway() -> None:
 
 def main() -> None:
     print("== WITHOUT the gateway (straight to the MCP server) ==")
-    without_gateway()
+    asyncio.run(without_gateway())
     print("\n== THROUGH the gateway ==")
     through_gateway()
 

@@ -55,14 +55,14 @@ of inside a single agent.
 
 ## Skeleton vs. roadmap
 
-This is the first slice. Already working: auth, allow-list, a pattern-based
-scanner, audit, an offline `MockUpstream`, and the before/after demo.
+Already working: auth, allow-list, a pattern-based scanner, audit, the offline
+`MockUpstream` + before/after demo, and **`StdioUpstream`** — the gateway spawns
+project #6 over stdio and proxies it via the MCP client SDK, holding one
+persistent session for its lifetime (connected in the FastAPI lifespan).
 
 Planned (follow-up PRs):
 
 - **llm-guard scanner** — swap the pattern fallback in `scanner.py` for llm-guard
   (PromptInjection on input, Secrets/PII on output) under the `guard` extra.
-- **stdio upstream** — `StdioUpstream` spawns project #6 and proxies via the MCP
-  client SDK.
 - **full MCP streamable-HTTP** — SSE streaming and session handling for real
   MCP-client compatibility.

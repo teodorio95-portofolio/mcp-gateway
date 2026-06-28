@@ -20,6 +20,7 @@ def _client(tmp_path: Path, guardrails: bool = True) -> TestClient:
     settings = Settings(
         policy_path=_ROOT / "policy.yaml",
         audit_path=tmp_path / "audit.jsonl",
+        upstream_kind="mock",
         upstream_cmd=[],
         guardrails=guardrails,
     )
